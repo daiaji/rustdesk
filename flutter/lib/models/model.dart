@@ -1187,10 +1187,11 @@ class ImageModel with ChangeNotifier {
 
   onRgba(int display, Uint8List rgba) {
     final pid = parent.target?.id;
+    final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
     img.decodeImageFromPixels(
         rgba,
-        parent.target?.ffiModel.rect?.width.toInt() ?? 0,
-        parent.target?.ffiModel.rect?.height.toInt() ?? 0,
+        rect?.width.toInt() ?? 0,
+        rect?.height.toInt() ?? 0,
         isWeb ? ui.PixelFormat.rgba8888 : ui.PixelFormat.bgra8888,
         onPixelsCopied: () {
       // Unlock the rgba memory from rust codes.
@@ -1799,6 +1800,32 @@ class CursorModel with ChangeNotifier {
   String peerId = '';
   WeakReference<FFI> parent;
 
+  // Only for mobile, touch mode
+  // To block touch event above the KeyHelpTools
+  //
+  // A better way is to not listen events from the KeyHelpTools.
+  // But we're now using a Container(child: Stack(...)) to wrap the KeyHelpTools,
+  // and the listener is on the Container.
+  Rect? _keyHelpToolsRect;
+  bool _lastIsBlocked = false;
+
+  set keyHelpToolsRect(Rect? r) {
+    _keyHelpToolsRect = r;
+    if (r == null) {
+      _lastIsBlocked = false;
+    } else {
+      // `lastIsBlocked` is only used in common/widgets/remote_input.dart -> _RawTouchGestureDetectorRegionState -> onDoubleTap()
+      // Because onDoubleTap() doesn't have the `event` parameter, we can't get the touch event's position.
+      //
+      // Block the touch event is safe here.
+      // `lastIsBlocked` is only used in onDoubleTap() to block the touch event from the KeyHelpTools. 
+      // `lastIsBlocked` will be set when the cursor is moving or touch somewhere else.
+      _lastIsBlocked = true;
+    }
+  }
+
+  get lastIsBlocked => _lastIsBlocked;
+
   ui.Image? get image => _image;
   CursorData? get cache => _cache;
 
@@ -1843,9 +1870,10 @@ class CursorModel with ChangeNotifier {
     return Rect.fromLTWH(x0, y0, size.width / scale, size.height / scale);
   }
 
+  get keyboardHeight => MediaQueryData.fromWindow(ui.window).viewInsets.bottom;
+
   double adjustForKeyboard() {
     final m = MediaQueryData.fromWindow(ui.window);
-    var keyboardHeight = m.viewInsets.bottom;
     final size = m.size;
     if (keyboardHeight < 100) return 0;
     final s = parent.target?.canvasModel.scale ?? 1.0;
@@ -1854,9 +1882,29 @@ class CursorModel with ChangeNotifier {
     return h - thresh;
   }
 
+  // mobile Soft keyboard, block touch event from the KeyHelpTools
+  shouldBlock(double x, double y) {
+    if (!(parent.target?.ffiModel.touchMode ?? false)) {
+      return false;
+    }
+    if (_keyHelpToolsRect == null) {
+      return false;
+    }
+    if (isPointInRect(Offset(x, y), _keyHelpToolsRect!)) {
+      return true;
+    }
+    return false;
+  }
+
   move(double x, double y) {
+    if (shouldBlock(x, y)) {
+      _lastIsBlocked = true;
+      return false;
+    }
+    _lastIsBlocked = false;
     moveLocal(x, y);
     parent.target?.inputModel.moveMouse(_x, _y);
+    return true;
   }
 
   moveLocal(double x, double y) {
@@ -2397,9 +2445,10 @@ class FFI {
       cursorModel.peerId = id;
     }
 
+    final isNewPeer = tabWindowId == null;
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
-    if (tabWindowId == null) {
+    if (isNewPeer) {
       // ignore: unused_local_variable
       final addRes = bind.sessionAddSync(
         sessionId: sessionId,
@@ -2418,20 +2467,32 @@ class FFI {
             'Unreachable, failed to add existed session to $id, the displays is null while display is $display');
         return;
       }
-      final addRes = bind.sessionAddExistedSync(id: id, sessionId: sessionId);
+      final addRes = bind.sessionAddExistedSync(
+          id: id, sessionId: sessionId, displays: Int32List.fromList(displays));
       if (addRes != '') {
         debugPrint(
             'Unreachable, failed to add existed session to $id, $addRes');
         return;
       }
-      bind.sessionTryAddDisplay(
-          sessionId: sessionId, displays: Int32List.fromList(displays));
       ffiModel.pi.currentDisplay = display;
     }
     if (isDesktop && connType == ConnType.defaultConn) {
       textureModel.updateCurrentDisplay(display ?? 0);
     }
-    final stream = bind.sessionStart(sessionId: sessionId, id: id);
+
+    // CAUTION: `sessionStart()` and `sessionStartWithDisplays()` are an async functions.
+    // Though the stream is returned immediately, the stream may not be ready.
+    // Any operations that depend on the stream should be carefully handled.
+    late final Stream<EventToUI> stream;
+    if (isNewPeer || display == null || displays == null) {
+      stream = bind.sessionStart(sessionId: sessionId, id: id);
+    } else {
+      // We have to put displays in `sessionStart()` to make sure the stream is ready
+      // and then the displays' capturing requests can be sent.
+      stream = bind.sessionStartWithDisplays(
+          sessionId: sessionId, id: id, displays: Int32List.fromList(displays));
+    }
+
     if (isWeb) {
       platformFFI.setRgbaCallback((int display, Uint8List data) {
         onEvent2UIRgba();
@@ -2441,14 +2502,6 @@ class FFI {
     }
 
     final cb = ffiModel.startEventListener(sessionId, id);
-
-    // Force refresh displays.
-    // The controlled side may not refresh the image when the (peer,display) is already subscribed.
-    if (displays != null) {
-      for (final display in displays) {
-        bind.sessionRefresh(sessionId: sessionId, display: display);
-      }
-    }
 
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
@@ -2500,8 +2553,8 @@ class FFI {
           }
         } else if (message is EventToUI_Rgba) {
           final display = message.field0;
-          if (imageModel.useTextureRender) {
-            debugPrint("EventToUI_Rgba display:$display");
+          if (imageModel.useTextureRender || ffiModel.pi.forceTextureRender) {
+            //debugPrint("EventToUI_Rgba display:$display");
             textureModel.setTextureType(display: display, gpuTexture: false);
             onEvent2UIRgba();
           } else {
@@ -2692,6 +2745,7 @@ class PeerInfo with ChangeNotifier {
 
   bool get isSupportMultiDisplay =>
       (isDesktop || isWebDesktop) && isSupportMultiUiSession;
+  bool get forceTextureRender => currentDisplay == kAllDisplayValue;
 
   bool get cursorEmbedded => tryGetDisplay()?.cursorEmbedded ?? false;
 
@@ -2700,30 +2754,32 @@ class PeerInfo with ChangeNotifier {
   bool get isAmyuniIdd =>
       platformAdditions[kPlatformAdditionsIddImpl] == 'amyuni_idd';
 
-  Display? tryGetDisplay() {
+  Display? tryGetDisplay({int? display}) {
     if (displays.isEmpty) {
       return null;
     }
-    if (currentDisplay == kAllDisplayValue) {
+    display ??= currentDisplay;
+    if (display == kAllDisplayValue) {
       return displays[0];
     } else {
-      if (currentDisplay > 0 && currentDisplay < displays.length) {
-        return displays[currentDisplay];
+      if (display > 0 && display < displays.length) {
+        return displays[display];
       } else {
         return displays[0];
       }
     }
   }
 
-  Display? tryGetDisplayIfNotAllDisplay() {
+  Display? tryGetDisplayIfNotAllDisplay({int? display}) {
     if (displays.isEmpty) {
       return null;
     }
-    if (currentDisplay == kAllDisplayValue) {
+    display ??= currentDisplay;
+    if (display == kAllDisplayValue) {
       return null;
     }
-    if (currentDisplay >= 0 && currentDisplay < displays.length) {
-      return displays[currentDisplay];
+    if (display >= 0 && display < displays.length) {
+      return displays[display];
     } else {
       return null;
     }
@@ -2746,6 +2802,12 @@ class PeerInfo with ChangeNotifier {
       return displays[display].scale;
     }
     return 1.0;
+  }
+
+  Rect? getDisplayRect(int display) {
+    final d = tryGetDisplayIfNotAllDisplay(display: display);
+    if (d == null) return null;
+    return Rect.fromLTWH(d.x, d.y, d.width.toDouble(), d.height.toDouble());
   }
 }
 

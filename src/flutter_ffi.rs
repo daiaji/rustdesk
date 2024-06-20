@@ -102,19 +102,16 @@ pub fn peer_get_default_sessions_count(id: String) -> SyncReturn<usize> {
     SyncReturn(sessions::get_session_count(id, ConnType::DEFAULT_CONN))
 }
 
-pub fn session_add_existed_sync(id: String, session_id: SessionID) -> SyncReturn<String> {
-    if let Err(e) = session_add_existed(id.clone(), session_id) {
+pub fn session_add_existed_sync(
+    id: String,
+    session_id: SessionID,
+    displays: Vec<i32>,
+) -> SyncReturn<String> {
+    if let Err(e) = session_add_existed(id.clone(), session_id, displays) {
         SyncReturn(format!("Failed to add session with id {}, {}", &id, e))
     } else {
         SyncReturn("".to_owned())
     }
-}
-
-pub fn session_try_add_display(session_id: SessionID, displays: Vec<i32>) -> SyncReturn<()> {
-    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.capture_displays(displays, vec![], vec![]);
-    }
-    SyncReturn(())
 }
 
 pub fn session_add_sync(
@@ -151,6 +148,23 @@ pub fn session_start(
     id: String,
 ) -> ResultType<()> {
     session_start_(&session_id, &id, events2ui)
+}
+
+pub fn session_start_with_displays(
+    events2ui: StreamSink<EventToUI>,
+    session_id: SessionID,
+    id: String,
+    displays: Vec<i32>,
+) -> ResultType<()> {
+    session_start_(&session_id, &id, events2ui)?;
+
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.capture_displays(displays.clone(), vec![], vec![]);
+        for display in displays {
+            session.refresh_video(display as _);
+        }
+    }
+    Ok(())
 }
 
 pub fn session_get_remember(session_id: SessionID) -> Option<bool> {
@@ -1180,8 +1194,8 @@ pub fn main_change_language(lang: String) {
     send_to_cm(&crate::ipc::Data::Language(lang));
 }
 
-pub fn main_video_save_directory(root: bool) -> String {
-    video_save_directory(root)
+pub fn main_video_save_directory(root: bool) -> SyncReturn<String> {
+    SyncReturn(video_save_directory(root))
 }
 
 pub fn main_set_user_default_option(key: String, value: String) {
@@ -1823,11 +1837,6 @@ pub fn main_current_is_wayland() -> SyncReturn<bool> {
 
 pub fn main_is_login_wayland() -> SyncReturn<bool> {
     SyncReturn(is_login_wayland())
-}
-
-pub fn main_start_pa() {
-    #[cfg(target_os = "linux")]
-    std::thread::spawn(crate::ipc::start_pa);
 }
 
 pub fn main_hide_docker() -> SyncReturn<bool> {

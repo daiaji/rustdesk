@@ -59,14 +59,12 @@ class RustdeskImpl {
   }
 
   String sessionAddExistedSync(
-      {required String id, required UuidValue sessionId, dynamic hint}) {
+      {required String id,
+      required UuidValue sessionId,
+      required Int32List displays,
+      dynamic hint}) {
     return '';
   }
-
-  void sessionTryAddDisplay(
-      {required UuidValue sessionId,
-      required Int32List displays,
-      dynamic hint}) {}
 
   String sessionAddSync(
       {required UuidValue sessionId,
@@ -92,6 +90,14 @@ class RustdeskImpl {
       jsonEncode({'id': id})
     ]);
     return Stream.empty();
+  }
+
+  Stream<EventToUI> sessionStartWithDisplays(
+      {required UuidValue sessionId,
+      required String id,
+      required Int32List displays,
+      dynamic hint}) {
+    throw UnimplementedError();
   }
 
   Future<bool?> sessionGetRemember(
@@ -937,7 +943,7 @@ class RustdeskImpl {
     throw UnimplementedError();
   }
 
-  Future<String> mainVideoSaveDirectory({required bool root, dynamic hint}) {
+  String mainVideoSaveDirectory({required bool root, dynamic hint}) {
     throw UnimplementedError();
   }
 
@@ -1404,10 +1410,6 @@ class RustdeskImpl {
 
   bool mainIsLoginWayland({dynamic hint}) {
     return false;
-  }
-
-  Future<void> mainStartPa({dynamic hint}) {
-    throw UnimplementedError();
   }
 
   bool mainHideDocker({dynamic hint}) {
